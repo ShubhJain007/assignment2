@@ -9,6 +9,7 @@ from pytorch3d.ops import sample_points_from_meshes
 from pytorch3d.structures import Meshes
 import dataset_location
 import torch
+from render_utils import render_views, save_gif
 
 
 
@@ -129,6 +130,7 @@ def train_model(args):
 
         # fitting
         fit_voxel(voxels_src, voxels_tgt, args)
+        frames = render_views([torch.sigmoid(voxels_src).unsqueeze(0), voxels_tgt.unsqueeze(0)], "vox", args.device)
 
 
     elif args.type == "point":
@@ -139,6 +141,7 @@ def train_model(args):
 
         # fitting
         fit_pointcloud(pointclouds_src, pointclouds_tgt, args)        
+        frames = render_views([pointclouds_src[0], pointclouds_tgt[0]], "point", args.device)
     
     elif args.type == "mesh":
         # initialization
@@ -148,6 +151,9 @@ def train_model(args):
 
         # fitting
         fit_mesh(mesh_src, mesh_tgt, args)        
+        frames = render_views([mesh_src, mesh_tgt], "mesh", args.device)
+
+    save_gif(frames, f"q1_fit_{args.type}.gif")
 
 
     

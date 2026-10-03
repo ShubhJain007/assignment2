@@ -1,6 +1,8 @@
+import os
+
 # specify the root location where u downloaded the dataset
-root_location = None
-use_full_dataset = False
+root_location = os.path.dirname(os.path.abspath(__file__))
+use_full_dataset = os.environ.get("USE_FULL_DATASET", "0") == "1"
 dataset_name = (
     "r2n2_shapenet_dataset_full" if use_full_dataset else "r2n2_shapenet_dataset"
 )

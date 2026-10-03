@@ -13,7 +13,25 @@ import utils_vox
 import matplotlib.pyplot as plt 
 from pytorch3d.transforms import Rotate, axis_angle_to_matrix
 import math
+import random
+import os
 import numpy as np
+import torch.nn.functional as F
+from pytorch3d.renderer import (
+    AlphaCompositor,
+    FoVPerspectiveCameras,
+    HardPhongShader,
+    MeshRasterizer,
+    MeshRenderer,
+    PointLights,
+    PointsRasterizationSettings,
+    PointsRasterizer,
+    PointsRenderer,
+    RasterizationSettings,
+    TexturesVertex,
+    look_at_view_transform,
+)
+from pytorch3d.structures import Pointclouds
 
 def get_args_parser():
     parser = argparse.ArgumentParser('Singleto3D', add_help=False)
@@ -28,6 +46,8 @@ def get_args_parser():
     parser.add_argument('--load_checkpoint', action='store_true')  
     parser.add_argument('--device', default='cuda', type=str) 
     parser.add_argument('--load_feat', action='store_true') 
+    parser.add_argument('--vox_thresh', default=0.5, type=float, help='occupancy probability used as the marching cubes isovalue')
+    parser.add_argument('--seed', default=0, type=int, help='seeds the random view picked for each test model')
     return parser
 
 def preprocess(feed_dict, args):
@@ -87,9 +107,12 @@ def compute_sampling_metrics(pred_points, gt_points, thresholds, eps=1e-8):
 
 def evaluate(predictions, mesh_gt, thresholds, args):
     if args.type == "vox":
-        voxels_src = predictions
+        voxels_src = torch.sigmoid(predictions)
         H,W,D = voxels_src.shape[2:]
-        vertices_src, faces_src = mcubes.marching_cubes(voxels_src.detach().cpu().squeeze().numpy(), isovalue=0.5)
+        vertices_src, faces_src = mcubes.marching_cubes(voxels_src.detach().cpu().squeeze().numpy(), isovalue=getattr(args, 'vox_thresh', 0.5))
+        if len(faces_src) == 0:
+            zero = torch.zeros(predictions.shape[0])
+            return {f"{m}@{t:f}": zero for t in thresholds for m in ["Precision", "Recall", "F1"]}
         vertices_src = torch.tensor(vertices_src).float()
         faces_src = torch.tensor(faces_src.astype(int))
         mesh_src = pytorch3d.structures.Meshes([vertices_src], [faces_src])
@@ -115,8 +138,78 @@ def evaluate(predictions, mesh_gt, thresholds, args):
     return metrics
 
 
+def voxels_to_mesh(voxels, center, isovalue=0.5):
+    H, W, D = voxels.shape[2:]
+    verts, faces = mcubes.marching_cubes(voxels.detach().cpu().squeeze().numpy(), isovalue=isovalue)
+    if len(faces) == 0:
+        return None
+    verts = torch.tensor(verts).float().unsqueeze(0)
+    faces = torch.tensor(faces.astype(np.int64))
+    verts = utils_vox.Mem2Ref(verts, H, W, D)
+    Rot = axis_angle_to_matrix(torch.tensor([[0.0, -math.pi, 0.0]]))
+    verts = Rotate(Rot).transform_points(verts)
+    verts = verts - verts.mean(1, keepdim=True) + center
+    return pytorch3d.structures.Meshes([verts[0]], [faces])
+
+
+def get_renderers(device, image_size=256):
+    mesh_renderer = MeshRenderer(
+        rasterizer=MeshRasterizer(raster_settings=RasterizationSettings(image_size=image_size, blur_radius=0.0, faces_per_pixel=1)),
+        shader=HardPhongShader(device=device),
+    )
+    points_renderer = PointsRenderer(
+        rasterizer=PointsRasterizer(raster_settings=PointsRasterizationSettings(image_size=image_size, radius=0.02)),
+        compositor=AlphaCompositor(background_color=(1, 1, 1)),
+    )
+    return mesh_renderer, points_renderer
+
+
+def render_mesh(mesh, renderer, cameras, lights, color=(0.7, 0.7, 1.0)):
+    if mesh is None:
+        return torch.ones(renderer.rasterizer.raster_settings.image_size, renderer.rasterizer.raster_settings.image_size, 3)
+    verts = mesh.verts_packed()
+    textures = TexturesVertex(verts_features=(torch.ones_like(verts) * torch.tensor(color, device=verts.device)).unsqueeze(0))
+    mesh = pytorch3d.structures.Meshes([verts], [mesh.faces_packed()], textures=textures)
+    return renderer(mesh, cameras=cameras, lights=lights)[0, ..., :3].clamp(0, 1).cpu()
+
+
+def render_points(points, renderer, cameras, color=(0.7, 0.7, 1.0)):
+    rgb = torch.ones_like(points) * torch.tensor(color, device=points.device)
+    pc = Pointclouds(points=[points], features=[rgb])
+    return renderer(pc, cameras=cameras)[0, ..., :3].clamp(0, 1).cpu()
+
+
+def visualize(feed_dict, predictions, mesh_gt, renderers, args, dist=1.5, elev=20.0, azim=45.0):
+    mesh_renderer, points_renderer = renderers
+    R, T = look_at_view_transform(dist=dist, elev=elev, azim=azim)
+    cameras = FoVPerspectiveCameras(R=R, T=T, device=args.device)
+    lights = PointLights(location=[[0.0, 1.0, -3.0]], device=args.device)
+    image_size = mesh_renderer.rasterizer.raster_settings.image_size
+
+    gt = mesh_gt[0].to(args.device)
+    gt_render = render_mesh(gt, mesh_renderer, cameras, lights)
+
+    if args.type == "vox":
+        center = gt.verts_packed().mean(0).cpu()
+        pred_mesh = voxels_to_mesh(torch.sigmoid(predictions[:1]), center, getattr(args, 'vox_thresh', 0.5))
+        pred_render = render_mesh(pred_mesh.to(args.device) if pred_mesh is not None else None, mesh_renderer, cameras, lights)
+    elif args.type == "point":
+        pred_render = render_points(predictions[0].detach(), points_renderer, cameras)
+    elif args.type == "mesh":
+        pred_mesh = predictions[0]
+        pred_mesh = pytorch3d.structures.Meshes([pred_mesh.verts_packed().detach()], [pred_mesh.faces_packed()])
+        pred_render = render_mesh(pred_mesh, mesh_renderer, cameras, lights)
+
+    rgb = feed_dict['images'][0].squeeze().float().cpu()
+    rgb = F.interpolate(rgb.permute(2, 0, 1).unsqueeze(0), size=(image_size, image_size), mode='bilinear', align_corners=False)
+    rgb = rgb[0].permute(1, 2, 0).clamp(0, 1)
+
+    return torch.cat([rgb, gt_render, pred_render], dim=1).numpy()
+
+
 
 def evaluate_model(args):
+    random.seed(args.seed)
     r2n2_dataset = R2N2("test", dataset_location.SHAPENET_PATH, dataset_location.R2N2_PATH, dataset_location.SPLITS_PATH, return_voxels=True, return_feats=args.load_feat)
 
     loader = torch.utils.data.DataLoader(
@@ -142,6 +235,9 @@ def evaluate_model(args):
     avg_p_score = []
     avg_r_score = []
 
+    renderers = get_renderers(args.device)
+    os.makedirs('vis', exist_ok=True)
+
     if args.load_checkpoint:
         checkpoint = torch.load(f'checkpoint_{args.type}.pth')
         model.load_state_dict(checkpoint['model_state_dict'])
@@ -164,11 +260,10 @@ def evaluate_model(args):
 
         metrics = evaluate(predictions, mesh_gt, thresholds, args)
 
-        # TODO:
-        # if (step % args.vis_freq) == 0:
-        #     # visualization block
-        #     #  rend = 
-        #     plt.imsave(f'vis/{step}_{args.type}.png', rend)
+        if (step % args.vis_freq) == 0:
+            with torch.no_grad():
+                rend = visualize(feed_dict, predictions, mesh_gt, renderers, args)
+            plt.imsave(f'vis/{step}_{args.type}.png', rend)
       
 
         total_time = time.time() - start_time

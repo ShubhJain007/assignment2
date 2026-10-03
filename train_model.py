@@ -37,7 +37,7 @@ def preprocess(feed_dict, args):
         voxels = feed_dict["voxels"].float()
         ground_truth_3d = voxels
     elif args.type == "point":
-        mesh = feed_dict["mesh"]
+        mesh = feed_dict["mesh"].to(args.device)
         pointclouds_tgt = sample_points_from_meshes(mesh, args.n_points)
         ground_truth_3d = pointclouds_tgt
     elif args.type == "mesh":

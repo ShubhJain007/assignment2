@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>16-825 Assignment 2</title>
+<style>
+  body { margin: 0 auto; max-width: 1000px; padding: 24px 16px; font: 16px/1.5 Helvetica, Arial, sans-serif; color: #222; background: #fff; }
+  h2 { margin-top: 40px; border-top: 1px solid #ddd; padding-top: 12px; }
+  img { max-width: 100%; display: block; margin: 8px 0; }
+  table { border-collapse: collapse; margin: 8px 0; }
+  th, td { border: 1px solid #ccc; padding: 4px 10px; }
+</style>
+</head>
+<body>
+<h1>16-825 Assignment 2: Single View to 3D</h1>
+
+<h2>1. Exploring loss functions</h2>
+<p>Left: optimized, right: ground truth.</p>
+<h3>1.1 Voxel grid</h3>
+<img src="assets/q1_fit_vox.gif" alt="">
+<h3>1.2 Point cloud</h3>
+<img src="assets/q1_fit_point.gif" alt="">
+<h3>1.3 Mesh</h3>
+<img src="assets/q1_fit_mesh.gif" alt="">
+
+<h2>2. Reconstructing 3D from single view</h2>
+<p>Each row: input RGB | ground-truth mesh | prediction.</p>
+
+<h3>2.1 Image to voxel grid &mdash; F1@0.05 = 53.4</h3>
+<img src="assets/q2_vox_0.png" alt=""><img src="assets/q2_vox_150.png" alt=""><img src="assets/q2_vox_400.png" alt="">
+<img src="assets/eval_vox.png" alt="">
+
+<h3>2.2 Image to point cloud &mdash; F1@0.05 = 79.7</h3>
+<img src="assets/q2_point_0.png" alt=""><img src="assets/q2_point_150.png" alt=""><img src="assets/q2_point_400.png" alt="">
+<img src="assets/eval_point.png" alt="">
+
+<h3>2.3 Image to mesh &mdash; F1@0.05 = 74.0</h3>
+<img src="assets/q2_mesh_0.png" alt=""><img src="assets/q2_mesh_150.png" alt=""><img src="assets/q2_mesh_400.png" alt="">
+<img src="assets/eval_mesh.png" alt="">
+<p><b>Comparison (point 79.7 &gt; mesh 74.0 &gt; voxel 53.4).</b> The point cloud is trained with chamfer loss, which measures nearly the same thing as F1, and its points can go anywhere. The mesh uses the same loss, but a deformed sphere cannot open holes between legs, so it fills gaps with webbing. Voxels are limited by the 32&sup3; resolution (one voxel &asymp; 0.03), and BCE on a mostly empty grid makes thin parts low-confidence, so they disappear at the 0.5 threshold.</p>
+
+<h2>2.4 Hyperparameter analysis</h2>
+<h3>Voxel occupancy threshold (same trained model)</h3>
+<table>
+  <tr><th>threshold</th><th>F1@0.05</th><th>empty predictions</th></tr>
+  <tr><td>0.2</td><td>55.3</td><td>0</td></tr>
+  <tr><td><b>0.3</b></td><td><b>65.0</b></td><td>3</td></tr>
+  <tr><td>0.4</td><td>63.4</td><td>10</td></tr>
+  <tr><td>0.5</td><td>53.5</td><td>39</td></tr>
+</table>
+<img src="assets/q24_vox_thresh.png" alt="">
+<p>Input | GT | threshold 0.2, 0.3, 0.4, 0.5. Lowering the threshold to 0.3 recovers thin parts and gives +11.5 F1 without retraining. At 0.2 shapes become bloated and precision drops.</p>
+
+<h3>Mesh smoothness weight <code>w_smooth</code></h3>
+<table>
+  <tr><th>w_smooth</th><th>F1@0.05</th></tr>
+  <tr><td>0.0</td><td>75.2</td></tr>
+  <tr><td>0.1</td><td>74.0</td></tr>
+  <tr><td>1.0</td><td>68.9</td></tr>
+</table>
+<img src="assets/q24_mesh_wsmooth.png" alt="">
+<p>Input | GT | w_smooth 0, 0.1, 1.0. Without smoothing, F1 is highest but the mesh is crumpled and self-intersecting, because F1 only checks point distances. A high weight gives clean meshes but cannot stretch into thin legs. 0.1 is the best trade-off.</p>
+
+<h2>2.5 Interpreting the model</h2>
+<h3>Error heatmaps (point model)</h3>
+<img src="assets/error_heatmaps.png" alt="">
+<p>Errors concentrate on thin structures (tall backs, legs). Bulky chairs are reconstructed accurately.</p>
+<h3>Output-point consistency</h3>
+<img src="assets/point_slot_colors.png" alt="">
+<p>Each output point index has a fixed colour. The same index always lands on the same part (back, seat, legs), so the decoder has learned a template chair that it deforms per input.</p>
+<h3>Feature interpolation</h3>
+<img src="assets/interpolation.png" alt="">
+<p>Interpolating the image features of two chairs decodes to a smooth sequence of plausible chairs, so the feature space is continuous.</p>
+<h3>Voxel confidence</h3>
+<img src="assets/voxel_confidence.png" alt="">
+<p>Thin parts get probabilities of 0.2&ndash;0.4: the model knows where they are but stays below 0.5, which explains the threshold result in 2.4.</p>
+
+<h2>3.3 Extended dataset (point cloud model)</h2>
+<table>
+  <tr><th>F1@0.05</th><th>trained on chairs</th><th>trained on 3 classes</th></tr>
+  <tr><td>chair</td><td>79.2</td><td>80.2</td></tr>
+  <tr><td>airplane</td><td>59.0</td><td>96.3</td></tr>
+  <tr><td>car</td><td>71.7</td><td>93.3</td></tr>
+</table>
+<img src="assets/q33_chairs.png" alt="">
+<img src="assets/q33_other.png" alt="">
+<p>Input | GT | chair-only model | 3-class model.</p>
+<p>On the same chair test set, training on three classes does not hurt (79.2 vs 80.2). The chair-only model turns every input into a chair, so it fails on planes and cars. Both models produce outputs that are much less diverse than the real shapes (pairwise chamfer between chair predictions: 0.005 vs 0.020 for the ground truth). The 3-class model effectively recognizes the class and deforms a class template: very consistent, but with less instance-specific detail.</p>
+</body>
+</html>
